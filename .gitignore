@@ -1,0 +1,13 @@
+# 数据产物不入库(爬取音频有版权,仅内部研究;RTTM/合成批次体积大)
+data/*
+# 例外:双域 timing 先验(聚合统计,合成管线的输入资产)
+!data/diar/
+data/diar/*
+!data/diar/timing_stats.json
+
+# 二进制与缓存
+scripts/crawl/yt-dlp.exe
+__pycache__/
+*.pyc
+*.log
+.pytest_cache/
