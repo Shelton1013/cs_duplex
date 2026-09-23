@@ -1,6 +1,6 @@
 # CantoDuplex
 
-粤英双语 duplex 交互决策控制器(sidecar)。完整方案见 `PLAN.md`,种子数据采集协议见 `docs/COLLECTION_PROTOCOL.md`。
+粤英双语 duplex 交互决策控制器(sidecar)。完整方案见 `PLAN.md`,种子数据采集协议见 `docs/COLLECTION_PROTOCOL.md`,**环境配置见 `docs/SETUP.md`**(核心代码零三方依赖;diar/vLLM 环境分开)。
 
 ## 目录
 

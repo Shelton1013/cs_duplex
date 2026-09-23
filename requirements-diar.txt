@@ -1,0 +1,7 @@
+# diarization 环境(scripts/diar/run_diar.py)—— 版本组合已踩坑锁死,勿乱升:
+#   - pyannote.audio 4.x 会把 CUDA torch 覆盖成 CPU 版 → 锁 3.3.2
+#   - huggingface_hub 1.x 移除 use_auth_token,与 pyannote 3.x 不兼容 → 锁 0.27.1
+#   - torch 用 cu121 wheel(driver >= 525 即可),安装命令见 docs/SETUP.md
+#     (torch 不写在本文件里,因为要用 --index-url 单独装,顺序在 pyannote 之后)
+pyannote.audio==3.3.2
+huggingface_hub==0.27.1

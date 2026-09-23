@@ -1,0 +1,4 @@
+# 核心代码(harness / synth / crawl / timing_stats / writer_llm 客户端)
+# 全部只用 Python 标准库,无三方运行时依赖 —— 这是刻意设计,别加包。
+# 唯一开发依赖:
+pytest>=7.0
