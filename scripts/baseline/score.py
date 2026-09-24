@@ -17,8 +17,8 @@ from harness.metrics import evaluate  # noqa: E402
 from harness.schema import Action, AgentUtterance, ProbeEvent, Session  # noqa: E402
 
 CLASSES = ["backchannel", "side_speech", "floor_claim", "correction_I0", "correction_I1",
-           "echo_question", "echo_confirm"]
-CONTINUE = {"backchannel", "side_speech", "echo_confirm"}
+           "echo_question", "echo_confirm", "real_bc", "host_control"]
+CONTINUE = {"backchannel", "side_speech", "echo_confirm", "real_bc", "host_control"}
 
 
 def load(probes: Path, actions_dir: Path):
@@ -64,6 +64,11 @@ def main() -> None:
     #  最终:只问"agent 说话期间有没有停",不论快慢(漏停截止放宽到 30s)
     views = [("及时(停≤0.8s)", 0.8), ("最终(说话期间停了没)", 30.0)]
     sections = []
+    # 只显示该探针集里实际存在的类别
+    first_dir = args.systems[0].split("=", 1)[1]
+    present, _ = load(Path(args.probes), Path(first_dir))
+    global CLASSES
+    CLASSES = [c for c in CLASSES if present.get(c)]
     for title, deadline in views:
         rows = [f"### {title}", "",
                 "| 系统 | 误停率↓ | 漏停率↓ | 延迟p50 | 延迟p90 | "
