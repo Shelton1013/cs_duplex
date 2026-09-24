@@ -27,14 +27,28 @@ FLOOR_CLAIMS = [
     ("sorry 打斷一下,仲有個問題", "mixed"),
     ("by the way 我仲想改埋地址", "mixed"),
 ]
-# 纠正模式:{new} 必须出现(类别不变量);语言按模式标注
+# ---- 纠正分级(结构性问题 2:防"正则可解",对齐 MPFD 的 I0–I2 分级)----
+# I0:显式否定词 → 词法可解(保留,作为最易档)
 CORRECTION_PATTERNS = [
     ("唔係啊,我問嘅係{new}", "yue"),
-    ("等等,係{new}先啱", "yue"),
+    ("等等,唔係,係{new}先啱", "yue"),
     ("唔係,I mean {new}", "mixed"),
     ("no no,{new}先啱", "mixed"),
     ("wait,我講嘅係{new}", "mixed"),
 ]
+# I1:无否定词,只说出新值 → 必须对照 agent 正在说的槽值才知道是纠正。
+#     「係」开头者专考"纠正被误判为应声"的级联错误
+CORRECTION_I1 = [
+    ("係{new}呀", "yue"), ("{new}喎", "yue"), ("我講緊{new}", "yue"),
+    ("係{new}先啱", "yue"), ("應該係{new}", "yue"), ("I mean {new}", "mixed"),
+]
+# I2:回声最小对——用户重复旧值,文本完全相同,只靠语调区分:
+#     升调质疑「{old}?」→ PAUSE(agent 应确认);降调确认「{old}。」→ ACK
+#     (标点仅作 TTS 语调控制信号;控制器只听音频,看不到标点)
+ECHO_QUESTION = "{old}?"
+ECHO_CONFIRM = "{old}。"
+
+NEGATION_MARKERS = ("唔係", "唔啱", "錯", "等等", "no", "wait", "not")
 
 DEFAULT_PRIORS = {
     "backchannel": 0.6,
@@ -42,7 +56,10 @@ DEFAULT_PRIORS = {
     "side_speech": 0.15,
     "filler": 0.15,
     "floor_claim": 0.12,
+    "echo_confirm": 0.12,   # I2 最小对的 continue 侧
 }
+# 纠正内部的难度配比(I0 / I1 / I2-质疑回声)
+CORRECTION_TIERS = (("I0", 0.4), ("I1", 0.4), ("I2", 0.2))
 MAX_EVENTS_PER_LINE = 2
 
 
@@ -56,8 +73,19 @@ class EventPlan:
 
 
 # ---- 类别不变量校验器(措辞扩充的准入门) ----
-def validate_correction(text: str, new_value: str, old_value: str) -> bool:
-    return (new_value in text) and (old_value != new_value) and (old_value not in text)
+def has_negation(text: str) -> bool:
+    low = text.lower()
+    return any(m in low for m in NEGATION_MARKERS)
+
+
+def validate_correction(text: str, new_value: str, old_value: str,
+                        tier: str = "I0") -> bool:
+    ok = (new_value in text) and (old_value != new_value) and (old_value not in text)
+    if tier == "I0":
+        return ok and has_negation(text)
+    if tier == "I1":  # I1 的定义:去掉否定词后仍是纠正 → 不得含否定词
+        return ok and not has_negation(text)
+    return ok
 
 
 def validate_backchannel(text: str) -> bool:
@@ -82,8 +110,15 @@ def load_wordings(path) -> dict:
                 continue
             if cls == "backchannel" and not validate_backchannel(text):
                 continue
-            if cls == "correction_pattern" and "{new}" not in text:
-                continue
+            if cls == "correction_pattern":
+                if "{new}" not in text:
+                    continue
+                # 按是否含否定词自动分档:有→I0,无→I1(分级由校验器决定,不信模型)
+                if not has_negation(text):
+                    if text not in {t for t, _ in CORRECTION_I1}:
+                        CORRECTION_I1.append((text, lang))
+                        n += 1
+                    continue
             bank.append((text, lang))
             existing.add(text)
             n += 1
@@ -101,21 +136,48 @@ def flip_slot(rng: random.Random, line: AgentLine) -> dict | None:
     return {"slot": slot.name, "old": slot.value, "new": rng.choice(alts)}
 
 
+def _pick_tier(rng: random.Random) -> str:
+    r, acc = rng.random(), 0.0
+    for tier, w in CORRECTION_TIERS:
+        acc += w
+        if r < acc:
+            return tier
+    return CORRECTION_TIERS[-1][0]
+
+
 def plan_events(rng: random.Random, line: AgentLine,
                 priors: dict | None = None) -> list[EventPlan]:
-    priors = priors or DEFAULT_PRIORS
+    priors = {**DEFAULT_PRIORS, **(priors or {})}
     plans: list[EventPlan] = []
     # 停止类事件(correction / floor_claim)每句至多一个,且互斥
     if rng.random() < priors["correction"]:
         flip = flip_slot(rng, line)
         if flip:
-            pat, lang = rng.choice(CORRECTION_PATTERNS)
-            text = pat.format(new=flip["new"])
-            assert validate_correction(text, flip["new"], flip["old"])
-            plans.append(EventPlan("correction", text, lang, slot_flip=flip))
+            tier = _pick_tier(rng)
+            if tier == "I2":  # 质疑回声:重复旧值、升调 → PAUSE,无槽值翻转
+                text = ECHO_QUESTION.format(old=flip["old"])
+                plans.append(EventPlan(
+                    "correction", text, "yue",
+                    slot_flip={"slot": flip["slot"], "old": flip["old"], "new": None},
+                    meta={"tier": "I2", "action": "PAUSE", "anchor_slot": flip["slot"]}))
+            else:
+                bank = CORRECTION_PATTERNS if tier == "I0" else CORRECTION_I1
+                pat, lang = rng.choice(bank)
+                text = pat.format(new=flip["new"])
+                assert validate_correction(text, flip["new"], flip["old"], tier), text
+                plans.append(EventPlan("correction", text, lang, slot_flip=flip,
+                                       meta={"tier": tier, "anchor_slot": flip["slot"]}))
     elif rng.random() < priors["floor_claim"]:
         text, lang = rng.choice(FLOOR_CLAIMS)
         plans.append(EventPlan("floor_claim", text, lang))
+    # I2 最小对的 continue 侧:降调确认回声(与质疑回声文本相同)
+    if len(plans) < MAX_EVENTS_PER_LINE and line.slots and rng.random() < priors["echo_confirm"]:
+        used = {p.meta.get("anchor_slot") for p in plans}
+        cands = [s for s in line.slots if s.name not in used]
+        if cands:
+            s = rng.choice(cands)
+            plans.append(EventPlan("backchannel", ECHO_CONFIRM.format(old=s.value), "yue",
+                                   meta={"tier": "I2", "anchor_slot": s.name}))
     # continue 类事件
     for cls, bank, p in (("backchannel", BACKCHANNELS, priors["backchannel"]),
                          ("side_speech", SIDE_SPEECH, priors["side_speech"]),

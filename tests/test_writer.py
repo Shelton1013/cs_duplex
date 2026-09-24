@@ -52,7 +52,7 @@ def test_extract_json_object_vs_array():
 
 def test_loaders_roundtrip(tmp_path):
     from synth.script import load_scenarios, make_dialogue
-    from synth.inject import CORRECTION_PATTERNS, load_wordings
+    from synth.inject import CORRECTION_I1, CORRECTION_PATTERNS, load_wordings
     import random
 
     scen = [{"scenario": "t1", "user_q": "我想查{month}賬單",
@@ -65,10 +65,12 @@ def test_loaders_roundtrip(tmp_path):
     assert len(dlg) == 1 and dlg[0][1].slots
 
     w = tmp_path / "w.json"
-    w.write_text(json.dumps({"correction_pattern": [["唔通係{new}?", "yue"],
-                                                    ["冇佔位符喎", "yue"]]},
+    w.write_text(json.dumps({"correction_pattern": [["唔通係{new}?", "yue"],     # 无否定→I1
+                                                    ["唔係喎,應該{new}", "yue"],  # 有否定→I0
+                                                    ["冇佔位符喎", "yue"]]},       # 缺{new}→拒
                             ensure_ascii=False), encoding="utf-8")
-    before = len(CORRECTION_PATTERNS)
+    before_i0, before_i1 = len(CORRECTION_PATTERNS), len(CORRECTION_I1)
     added = load_wordings(w)
-    assert added["correction_pattern"] == 1  # 缺 {new} 的被拒
-    assert len(CORRECTION_PATTERNS) == before + 1
+    assert added["correction_pattern"] == 2
+    assert len(CORRECTION_PATTERNS) == before_i0 + 1  # 分档由校验器决定,不信模型
+    assert len(CORRECTION_I1) == before_i1 + 1

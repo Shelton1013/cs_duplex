@@ -72,9 +72,10 @@ def _place_events(rng: random.Random, priors: TimingPriors, line: AgentLine,
             onset = utt_start + rng.uniform(0.4, 0.8) * utt_dur
         delay = rng.uniform(0.25, 0.45)
         cut_time = round(min(onset + delay, utt_end), 3)
-        action = "CUT" if p.cls == "correction" else "YIELD"
+        action = p.meta.get("action") or ("CUT" if p.cls == "correction" else "YIELD")
         ev = {
             "cls": p.cls, "text": p.text, "language": p.language,
+            "implicitness": p.meta.get("tier"),
             "t_onset": round(onset, 3),
             "t_end": round(onset + est_dur(p.text), 3),
             "gold": {
@@ -85,12 +86,14 @@ def _place_events(rng: random.Random, priors: TimingPriors, line: AgentLine,
         }
         if p.cls == "correction":
             idx = char_index_at(line.text, utt_start, cut_time)
+            new = p.slot_flip["new"]
             ev["gold"]["slot_flip"] = p.slot_flip
             ev["gold"]["resume"] = {
                 "cut_char": idx,
                 "played_text": line.text[:idx],
                 "remainder": line.text[idx:],
-                "corrected_reply": line.rerender(p.slot_flip["slot"], p.slot_flip["new"]),
+                # I2 质疑回声无新值:不改内容,确认后从截断点接着讲
+                "corrected_reply": line.rerender(p.slot_flip["slot"], new) if new else None,
             }
         events.append(ev)
         break  # 停止类每句至多一个
@@ -99,7 +102,11 @@ def _place_events(rng: random.Random, priors: TimingPriors, line: AgentLine,
     for p in plans:
         if p.cls in ("correction", "floor_claim"):
             continue
-        if p.cls == "backchannel":
+        if p.meta.get("anchor_slot"):  # I2 确认回声:紧跟被回声的槽值之后
+            slot = next(s for s in line.slots if s.name == p.meta["anchor_slot"])
+            onset = utt_start + sum(char_weights(line.text)[: slot.end]) + rng.uniform(0.2, 0.5)
+            dur = est_dur(p.text)
+        elif p.cls == "backchannel":
             off = priors.sample("ins_offset", 0.3, max(0.4, utt_dur - 0.5))
             onset = utt_start + off
             dur = priors.sample("ins_dur", 0.15, 1.2)
@@ -113,6 +120,7 @@ def _place_events(rng: random.Random, priors: TimingPriors, line: AgentLine,
         action = "BACKCHANNEL_ACK" if p.cls == "backchannel" else "CONTINUE"
         events.append({
             "cls": p.cls, "text": p.text, "language": p.language,
+            "implicitness": p.meta.get("tier"),
             "t_onset": round(onset, 3), "t_end": round(onset + dur, 3),
             "gold": {"action": action, "phased": [[0.0, action]]},
         })
@@ -151,7 +159,11 @@ def compile_session(rng: random.Random, dialogue: list[tuple[str, AgentLine]],
         # 纠正 → repair 话语
         if stop_ev is not None and stop_ev["cls"] == "correction":
             gap = rng.uniform(0.2, 0.6)
-            rep_text = "明白," + stop_ev["gold"]["resume"]["corrected_reply"]
+            r = stop_ev["gold"]["resume"]
+            if r["corrected_reply"]:  # I0/I1:按新槽值重述
+                rep_text = "明白," + r["corrected_reply"]
+            else:  # I2 质疑回声:先确认旧值,再从截断点续讲(不重复已播内容)
+                rep_text = f"係呀,係{stop_ev['gold']['slot_flip']['old']}," + r["remainder"]
             rep_start = t + gap
             rep_dur = est_dur(rep_text)
             agent_utts.append({"t_start": round(rep_start, 3),
@@ -181,7 +193,7 @@ def to_harness_session(sess: dict):
         probes.append(ProbeEvent(e["t_onset"], e["t_end"], cls,
                                  e["text"], e["language"]))
         g = e["gold"]
-        if g["action"] in ("CUT", "YIELD"):
+        if g["action"] in ("CUT", "YIELD", "PAUSE"):
             actions.append(Action(g["cut_time"], g["action"]))
         elif g["action"] == "BACKCHANNEL_ACK":
             actions.append(Action(round(e["t_onset"] + 0.15, 3), "BACKCHANNEL_ACK"))

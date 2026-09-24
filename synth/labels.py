@@ -28,7 +28,7 @@ def _label_at(sess: dict, t: float) -> str:
         for pt, lab in g["phased"]:
             if rel >= pt:
                 cur = lab
-        if cur in ("CUT", "YIELD") and t >= g.get("cut_time", float("inf")) + COMMIT_WINDOW:
+        if cur in ("CUT", "YIELD", "PAUSE") and t >= g.get("cut_time", float("inf")) + COMMIT_WINDOW:
             cur = "IDLE"  # 截断已执行且过了提交窗
         if cur:
             label = cur
