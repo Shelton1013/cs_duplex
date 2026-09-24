@@ -109,6 +109,46 @@ def room_turn_away(w: np.ndarray, rng: random.Random) -> np.ndarray:
     return (y / (np.abs(y).max() + 1e-9) * np.abs(w).max() * 10 ** (rng.uniform(-10, -3) / 20)).astype(np.float32)
 
 
+def room_at_distance(w: np.ndarray, rng: random.Random, near: bool) -> np.ndarray:
+    """公平的房间条件:两类都进同类房间(pyroomacoustics 镜像法),只差声源距离。
+    near(对手机):0.1–0.3m;far(转头):1.5–3m。增益分布与训练一致。"""
+    import pyroomacoustics as pra
+    dims = [rng.uniform(3, 6), rng.uniform(3, 5), rng.uniform(2.5, 3.2)]
+    e_abs, max_order = pra.inverse_sabine(rng.uniform(0.3, 0.8), dims)
+    room = pra.ShoeBox(dims, fs=SR, materials=pra.Material(e_abs), max_order=min(max_order, 12))
+    mic = [dims[0] / 2, dims[1] / 2, 1.2]
+    d = rng.uniform(0.1, 0.3) if near else rng.uniform(1.5, 3.0)
+    ang = rng.uniform(0, 2 * np.pi)
+    src = [min(max(mic[0] + d * np.cos(ang), 0.3), dims[0] - 0.3),
+           min(max(mic[1] + d * np.sin(ang), 0.3), dims[1] - 0.3), 1.2 if near else 1.5]
+    room.add_source(src, signal=w)
+    room.add_microphone(mic)
+    room.simulate()
+    y = room.mic_array.signals[0][: len(w) + int(0.3 * SR)]
+    gain = rng.uniform(-2, 2) if near else rng.uniform(-10, -3)
+    return (y / (np.abs(y).max() + 1e-9) * np.abs(w).max() * 10 ** (gain / 20)).astype(np.float32)
+
+
+def load_eval_set(ev_dir: Path, rng: random.Random):
+    """干净评测集(make_eval_set.py 生成,文本与训练不重合)。"""
+    out = {k: [] for k in ("intonation_clean", "addressee_dry", "addressee_room",
+                           "addressee_dry_pairs", "addressee_room_pairs")}
+    for line in (ev_dir / "labels.jsonl").read_text(encoding="utf-8").splitlines():
+        r = json.loads(line)
+        sub = "addressee" if r["task"] == "addressee" else "intonation"
+        w, _ = sf.read(ev_dir / sub / f"{r['id']}.wav", dtype="float32")
+        if r["task"] == "intonation":
+            out["intonation_clean"].append((w, r["label"]))
+            continue
+        room = room_at_distance(w, rng, near=bool(r["label"]))
+        out["addressee_dry"].append((w, r["label"]))
+        out["addressee_room"].append((room, r["label"]))
+        if r["subtype"] == "pair":
+            out["addressee_dry_pairs"].append((w, r["label"]))
+            out["addressee_room_pairs"].append((room, r["label"]))
+    return out
+
+
 def load_probe_segments(probes: Path, rng: random.Random):
     """从 v2 探针的 user.wav 切出探针段。"""
     intonation, addressee, addressee_room = [], [], []
@@ -154,6 +194,7 @@ def main() -> None:
     ap.add_argument("--out", required=True)
     ap.add_argument("--layer", type=int, default=8)
     ap.add_argument("--device", default="cuda:0")
+    ap.add_argument("--eval_set", default="", help="make_eval_set.py 生成的干净评测集目录")
     args = ap.parse_args()
     rng = random.Random(0)
 
@@ -169,6 +210,8 @@ def main() -> None:
         w, _ = sf.read(r["path"], dtype="float32")
         cache[r["id"]] = feats(w)
     probe_sets = load_probe_segments(Path(args.probes), rng)
+    if args.eval_set:
+        probe_sets.update(load_eval_set(Path(args.eval_set), rng))
     probe_feats = {k: [(feats(w), y) for w, y in v] for k, v in probe_sets.items()}
     print("probe eval sets:", {k: len(v) for k, v in probe_feats.items()}, flush=True)
 
@@ -178,8 +221,14 @@ def main() -> None:
         return np.stack([f[group] for f in items])
 
     results = {}
-    for task, probe_keys in (("intonation", {"xtts": "intonation"}),
-                             ("addressee", {"xtts": "addressee", "xtts_room": "addressee_room"})):
+    if args.eval_set:  # 干净评测集:v2 说话对象类与训练文本重合,不再使用
+        tasks = (("intonation", {"xtts_v2": "intonation", "clean": "intonation_clean"}),
+                 ("addressee", {"clean_dry": "addressee_dry", "clean_room": "addressee_room",
+                                "pairs_dry": "addressee_dry_pairs", "pairs_room": "addressee_room_pairs"}))
+    else:
+        tasks = (("intonation", {"xtts": "intonation"}),
+                 ("addressee", {"xtts": "addressee", "xtts_room": "addressee_room"}))
+    for task, probe_keys in tasks:
         tr = [r for r in rows if r["task"] == task and r["split"] == "train"]
         va = [r for r in rows if r["task"] == task and r["split"] == "val"]
         for group in ("prosody", "wavlm", "both"):
@@ -196,13 +245,12 @@ def main() -> None:
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     (out / "stage0_results.json").write_text(json.dumps(results, indent=1), encoding="utf-8")
-    lines = ["| 任务/特征 | val_spk 平衡准确率 | val_spk AUC | 跨TTS 平衡准确率 | 跨TTS AUC | 跨TTS+真实房间仿真 平衡准确率 | AUC |",
-             "|---|---|---|---|---|---|---|"]
+    conds = sorted({c for v in results.values() for c in v})
+    lines = ["| 任务/特征 | " + " | ".join(f"{c} 平衡准确率 / AUC (n)" for c in conds) + " |",
+             "|---" * (len(conds) + 1) + "|"]
     for k, v in results.items():
-        def g(c, m):
-            return v.get(c, {}).get(m, "—")
-        lines.append(f"| {k} | {g('val_spk','bal_acc')} | {g('val_spk','auc')} | {g('xtts','bal_acc')} | "
-                     f"{g('xtts','auc')} | {g('xtts_room','bal_acc')} | {g('xtts_room','auc')} |")
+        cells = [f"{v[c]['bal_acc']} / {v[c]['auc']} ({v[c]['n']})" if c in v else "—" for c in conds]
+        lines.append(f"| {k} | " + " | ".join(cells) + " |")
     (out / "stage0_results.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     print("\n".join(lines))
 
