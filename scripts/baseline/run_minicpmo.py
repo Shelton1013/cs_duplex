@@ -69,6 +69,17 @@ def main() -> None:
         torch.manual_seed(0)
         model.prepare(prefix_system_prompt="Streaming Omni Conversation.",
                       ref_audio=ref_audio, prompt_wav_path=ref_path)
+        # 预热:冒烟测试发现它会先主动讲开场白(与用户输入无关)。先喂静音,
+        # 直到连续 2 秒处于聆听态(开场白结束)再开始喂会话音频;时间轴从预热后算起。
+        preroll, calm = 0, 0
+        while calm < 2 and preroll < 30:
+            model.streaming_prefill(audio_waveform=np.zeros(SEC, np.float32),
+                                    frame_list=[], max_slice_nums=1, batch_vision_feed=False)
+            r = model.streaming_generate(prompt_wav_path=ref_path,
+                                         max_new_speak_tokens_per_chunk=20,
+                                         decode_mode=args.decode)
+            calm = calm + 1 if r.get("is_listen", True) else 0
+            preroll += 1
         trace, actions, prev_listen = [], [], True
         for idx in range(n // SEC):
             model.streaming_prefill(audio_waveform=buf[idx * SEC:(idx + 1) * SEC],
@@ -83,7 +94,8 @@ def main() -> None:
                 actions.append({"t": t, "kind": "CUT"})
             prev_listen = listen
         (out / f"{s.name}.json").write_text(
-            json.dumps({"actions": actions, "trace": trace}, ensure_ascii=False), encoding="utf-8")
+            json.dumps({"actions": actions, "trace": trace, "preroll_s": preroll},
+                       ensure_ascii=False), encoding="utf-8")
         if (j + 1) % 20 == 0 or args.limit:
             print(f"{j + 1}/{len(todo)}  {(time.time() - t_all) / (j + 1):.1f}s/session", flush=True)
     print("done ->", out)
