@@ -32,7 +32,10 @@ def load(probes: Path, actions_dir: Path):
         if not act_f.exists():
             missing += 1
             continue
-        acts = json.loads(act_f.read_text(encoding="utf-8"))["actions"]
+        # 只有 agent 说话期间的停止才是"打断自己";agent 说完后的开口是正常接话
+        a_end = max(u["t_end"] for u in meta["agent_utts"])
+        acts = [a for a in json.loads(act_f.read_text(encoding="utf-8"))["actions"]
+                if a["t"] <= a_end]
         sess = Session(
             meta["session_id"],
             [AgentUtterance(u["t_start"], u["t_end"], u["text"]) for u in meta["agent_utts"]],
@@ -55,27 +58,35 @@ def main() -> None:
     ap.add_argument("--out", default=str(ROOT / "data" / "baselines" / "table.md"))
     args = ap.parse_args()
 
-    rows = ["| 系统 | 误停率↓ | 漏停率↓ | 延迟p50 | 延迟p90 | "
-            + " | ".join(f"{c}" for c in CLASSES) + " |",
-            "|" + "---|" * (5 + len(CLASSES))]
-    for spec in args.systems:
-        name, d = spec.split("=", 1)
-        by_cls, missing = load(Path(args.probes), Path(d))
-        all_s = [s for v in by_cls.values() for s in v]
-        rep = evaluate(all_s)
-        cells = []
-        for c in CLASSES:
-            r = evaluate(by_cls[c])
-            v = r.false_stop_rate if c in CONTINUE else r.missed_stop_rate
-            cells.append(f"{fmt(v)} (n={len(by_cls[c])})")
-        rows.append(f"| {name} | {fmt(rep.false_stop_rate)} | {fmt(rep.missed_stop_rate)} | "
-                    f"{fmt(rep.latency_percentile(50))} | {fmt(rep.latency_percentile(90))} | "
-                    + " | ".join(cells) + " |")
-        if missing:
-            print(f"[{name}] warning: {missing} sessions without actions")
+    # 两种视角(探针 session 只含一个探针,长归因窗是干净的):
+    #  及时:漏停截止 0.8s;误停窗 = 探针后 agent 余下全部话语
+    #  最终:只问"agent 说话期间有没有停",不论快慢(漏停截止放宽到 30s)
+    views = [("及时(停≤0.8s)", 0.8), ("最终(说话期间停了没)", 30.0)]
+    sections = []
+    for title, deadline in views:
+        rows = [f"### {title}", "",
+                "| 系统 | 误停率↓ | 漏停率↓ | 延迟p50 | 延迟p90 | "
+                + " | ".join(CLASSES) + " |",
+                "|" + "---|" * (5 + len(CLASSES))]
+        for spec in args.systems:
+            name, d = spec.split("=", 1)
+            by_cls, missing = load(Path(args.probes), Path(d))
+            kw = {"stop_deadline": deadline, "react_window": 30.0}
+            rep = evaluate([s for v in by_cls.values() for s in v], **kw)
+            cells = []
+            for c in CLASSES:
+                r = evaluate(by_cls[c], **kw)
+                v = r.false_stop_rate if c in CONTINUE else r.missed_stop_rate
+                cells.append(f"{fmt(v)} (n={len(by_cls[c])})")
+            rows.append(f"| {name} | {fmt(rep.false_stop_rate)} | {fmt(rep.missed_stop_rate)} | "
+                        f"{fmt(rep.latency_percentile(50))} | {fmt(rep.latency_percentile(90))} | "
+                        + " | ".join(cells) + " |")
+            if missing and title == views[0][0]:
+                print(f"[{name}] warning: {missing} sessions without actions")
+        sections.append("\n".join(rows))
     note = ("\n按类别列:continue 类(backchannel/side_speech)为误停率,"
-            "stop 类(floor_claim/correction)为漏停率;漏停截止 0.8s。\n")
-    table = "\n".join(rows) + "\n" + note
+            "stop 类(floor_claim/correction)为漏停率。\n")
+    table = "\n\n".join(sections) + "\n" + note
     print(table)
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     Path(args.out).write_text(table, encoding="utf-8")
