@@ -50,12 +50,44 @@ CORR_I0 = ["唔係啊,我問嘅係{new}", "等等,唔係,係{new}先啱", "no no
            "wait wait,唔係,係{new}"]
 CORR_I1 = ["係{new}呀", "{new}喎", "我講緊{new}", "係{new}先啱"]
 
+# I2 回声最小对:重复 agent 刚说的槽值,文本相同只靠语调区分
+#   echo_question「{old}?」升调质疑 → 应停(PAUSE 确认)
+#   echo_confirm 「{old}。」降调确认 → 应继续
+# 渲染后做句尾 F0 质检:质疑句尾/均值 必须比确认高出 I2_MIN_CONTRAST,否则换音色重渲,
+# 仍不达标则丢弃该最小对(避免声学上不可分的样本污染评测)
+I2_MIN_CONTRAST = 0.12
+
 # (类别, 权重)
-CLASS_MIX = [("backchannel", 0.30), ("side_speech", 0.15), ("floor_claim", 0.15),
-             ("correction_I0", 0.20), ("correction_I1", 0.20)]
+CLASS_MIX = [("backchannel", 0.20), ("side_speech", 0.12), ("floor_claim", 0.10),
+             ("correction_I0", 0.14), ("correction_I1", 0.14),
+             ("echo_question", 0.15), ("echo_confirm", 0.15)]
 HARNESS_CLS = {"backchannel": "backchannel", "side_speech": "side_speech",
                "floor_claim": "floor_claim", "correction_I0": "correction",
-               "correction_I1": "correction"}
+               "correction_I1": "correction", "echo_question": "correction",
+               "echo_confirm": "backchannel"}
+
+
+def f0_track(wav: np.ndarray, sr: int = SR) -> np.ndarray:
+    """粗略自相关 F0(仅用于 I2 语调质检)。"""
+    out = []
+    for i in range(0, len(wav) - 640, 160):
+        x = wav[i:i + 640]
+        if np.sqrt((x ** 2).mean()) < 0.02:
+            continue
+        x = x - x.mean()
+        ac = np.correlate(x, x, "full")[639:]
+        lo, hi = int(sr / 400), int(sr / 70)
+        k = lo + int(np.argmax(ac[lo:hi]))
+        if ac[k] > 0.3 * ac[0]:
+            out.append(sr / k)
+    return np.array(out)
+
+
+def tail_ratio(wav: np.ndarray) -> float:
+    f = f0_track(wav)
+    if len(f) < 6:
+        return 1.0
+    return float(f[-max(3, len(f) // 4):].mean() / f.mean())
 
 
 async def _tts(text: str, voice: str, mp3: Path, proxy: str | None) -> None:
@@ -114,6 +146,7 @@ def main() -> None:
     proxy = args.proxy or None
     rng = random.Random(args.seed)
     index = []
+    n_i2_dropped = 0
 
     for i in range(args.n):
         sid = f"probe_{i:05d}"
@@ -125,7 +158,26 @@ def main() -> None:
         t_agent0, t_agent1 = lead, lead + d_agent
 
         slot_flip = None
-        if cls.startswith("correction"):
+        user = None
+        if cls.startswith("echo"):
+            slot = rng.choice(line.slots)
+            slot_end = t_agent0 + d_agent * slot.end / max(1, len(line.text))
+            onset = slot_end + rng.uniform(0.2, 0.5)
+            text = slot.value + ("?" if cls == "echo_question" else "。")
+            slot_flip = {"slot": slot.name, "old": slot.value, "new": None}
+            # 语调质检:同一音色渲染两种语调,对比达标才用
+            voices = USER_VOICES[:]
+            rng.shuffle(voices)
+            for v in voices:
+                q = tts_wav(slot.value + "?", v, cache, proxy)
+                c = tts_wav(slot.value + "。", v, cache, proxy)
+                if tail_ratio(q) - tail_ratio(c) >= I2_MIN_CONTRAST:
+                    user = q if cls == "echo_question" else c
+                    break
+            if user is None:
+                n_i2_dropped += 1
+                continue
+        elif cls.startswith("correction"):
             slot = rng.choice(line.slots)
             new = rng.choice([v for v in SLOT_BANK[slot.name] if v != slot.value])
             slot_flip = {"slot": slot.name, "old": slot.value, "new": new}
@@ -138,7 +190,8 @@ def main() -> None:
                     "floor_claim": FLOOR_CLAIM}[cls]
             text = rng.choice(bank)
             onset = t_agent0 + rng.uniform(0.25, 0.7) * d_agent
-        user = tts_wav(text, rng.choice(USER_VOICES), cache, proxy)
+        if user is None:
+            user = tts_wav(text, rng.choice(USER_VOICES), cache, proxy)
         d_user = len(user) / SR
         onset = min(onset, t_agent1 - 0.5)  # 必须落在 agent 说话期间(duplex 定义)
         total = max(t_agent1, onset + d_user) + 2.0
@@ -177,6 +230,7 @@ def main() -> None:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
     from collections import Counter
     print("done:", dict(Counter(r["probe_class"] for r in index)), "->", out)
+    print(f"I2 语调质检丢弃: {n_i2_dropped}")
 
 
 if __name__ == "__main__":

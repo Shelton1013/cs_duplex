@@ -16,8 +16,9 @@ sys.path.insert(0, str(ROOT))
 from harness.metrics import evaluate  # noqa: E402
 from harness.schema import Action, AgentUtterance, ProbeEvent, Session  # noqa: E402
 
-CLASSES = ["backchannel", "side_speech", "floor_claim", "correction_I0", "correction_I1"]
-CONTINUE = {"backchannel", "side_speech"}
+CLASSES = ["backchannel", "side_speech", "floor_claim", "correction_I0", "correction_I1",
+           "echo_question", "echo_confirm"]
+CONTINUE = {"backchannel", "side_speech", "echo_confirm"}
 
 
 def load(probes: Path, actions_dir: Path):
@@ -43,7 +44,7 @@ def load(probes: Path, actions_dir: Path):
              for p in meta["probes"]],
             [Action(a["t"], a["kind"]) for a in acts],
         )
-        by_cls[meta["probe_class"]].append(sess)
+        by_cls.setdefault(meta["probe_class"], []).append(sess)
     return by_cls, missing
 
 
