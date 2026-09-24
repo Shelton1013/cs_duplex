@@ -32,7 +32,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from run_vad import energy_vad  # noqa: E402
 
 BACKCHANNEL_TOKENS = ["明白", "okay", "ok", "yeah", "yes", "right", "uhhuh", "hmm", "mm",
-                      "係", "系", "啱", "岩", "好", "嗯", "哦", "噢", "呀", "啊", "吖", "對", "对"]
+                      "係", "系", "啱", "岩", "好", "嗯", "唔", "哦", "噢", "呀", "啊", "吖",
+                      "對", "对",
+                      "嘛", "喎", "囉", "咯", "啦"]  # 句末语气助词(「啱嘛」「係囉」)
 INTERRUPT_MARKERS = ["唔係", "唔系", "唔啱", "唔岩", "等等", "等陣", "wait", "no", "not", "sorry"]
 FIRST_CHECK, STEP, MAX_BC = 0.3, 0.2, 1.2
 
@@ -40,11 +42,12 @@ FIRST_CHECK, STEP, MAX_BC = 0.3, 0.2, 1.2
 def clean(text: str) -> str:
     text = re.sub(r"<\|[^|]*\|>", "", text)
     text = re.sub(r"[^\w]", "", text.lower())
+    text = re.sub(r"([a-z])\1+", r"\1", text)  # 重复字母归一:ook/okk → ok
     return text.replace("_", "")
 
 
 def classify(text: str) -> str:
-    """返回 'interrupt' / 'content' / 'backchannel' / 'empty'。"""
+    """返回 'interrupt' / 'content' / 'backchannel' / 'empty'(empty=继续等)。"""
     t = clean(text)
     if not t:
         return "empty"
@@ -53,7 +56,12 @@ def classify(text: str) -> str:
     rest = t
     for tok in sorted(BACKCHANNEL_TOKENS, key=len, reverse=True):
         rest = rest.replace(tok, "")
-    return "backchannel" if not rest else "content"
+    if not rest:
+        return "backchannel"
+    # 流式前缀被截在应声词中间(「明」←明白,「o」←ok):未定,等下一个检查点
+    if any(tok.startswith(rest) and tok != rest for tok in BACKCHANNEL_TOKENS):
+        return "empty"
+    return "content"
 
 
 def main() -> None:
