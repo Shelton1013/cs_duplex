@@ -45,15 +45,20 @@ INSTR_S = "You are a helpful assistant. 请用广东话,以平淡、肯定的语
 QC_MIN = 0.12
 
 
-def pick_voices(mce_audio: Path, n: int, rng: random.Random) -> list[Path]:
+def pick_voices(mce_audio: Path, n: int, rng: random.Random,
+                spk_map: dict | None) -> list[Path]:
+    """每个说话人只取一个音色(MCE 同一人对应多个目录,spk_map 来自声纹聚类)。"""
     dirs = sorted(d for d in mce_audio.iterdir() if d.is_dir())
     rng.shuffle(dirs)
-    voices = []
+    voices, used_spk = [], set()
     for d in dirs:
+        spk = spk_map.get(d.name, d.name) if spk_map else d.name
+        if spk in used_spk:
+            continue
         for w in sorted(d.glob("*.wav"))[:20]:
-            info = sf.info(w)
-            if 4.0 <= info.duration <= 10.0:
+            if 4.0 <= sf.info(w).duration <= 10.0:
                 voices.append(w)
+                used_spk.add(spk)
                 break
         if len(voices) >= n:
             break
@@ -89,7 +94,10 @@ def main() -> None:
     ap.add_argument("--cosyvoice_repo", default="/home/pxieaf/CosyVoice")
     ap.add_argument("--model", default="/home/share/data_makchen/peng/models/Fun-CosyVoice3-0.5B-2512")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--spk_map", default="", help="cluster_mce_speakers.py 的输出(目录→说话人)")
     args = ap.parse_args()
+    spk_map = (json.loads(Path(args.spk_map).read_text(encoding="utf-8"))["folder2spk"]
+               if args.spk_map else None)
 
     rng = random.Random(args.seed)
     nrng = np.random.default_rng(args.seed)
@@ -110,7 +118,7 @@ def main() -> None:
         g = np.gcd(SR, tts_sr)
         return resample_poly(x, SR // g, tts_sr // g).astype(np.float32)
 
-    voices = pick_voices(Path(args.mce), args.n_voices, rng)
+    voices = pick_voices(Path(args.mce), args.n_voices, rng, spk_map)
     split = {str(v): ("val" if i < args.val_voices else "train") for i, v in enumerate(voices)}
     print(f"voices: {len(voices)} ({args.val_voices} held out for val)", flush=True)
     labels = open(out / "labels.jsonl", "a", encoding="utf-8")
