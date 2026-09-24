@@ -95,6 +95,9 @@ def main() -> None:
     ap.add_argument("--model", default="/home/share/data_makchen/peng/models/Fun-CosyVoice3-0.5B-2512")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--spk_map", default="", help="cluster_mce_speakers.py 的输出(目录→说话人)")
+    ap.add_argument("--voice_seed", type=int, default=0,
+                    help="音色选择与 train/val 划分的种子;分片并行时各片须相同")
+    ap.add_argument("--id_prefix", default="", help="分片并行时的样本 id 前缀,避免重名")
     args = ap.parse_args()
     spk_map = (json.loads(Path(args.spk_map).read_text(encoding="utf-8"))["folder2spk"]
                if args.spk_map else None)
@@ -118,7 +121,7 @@ def main() -> None:
         g = np.gcd(SR, tts_sr)
         return resample_poly(x, SR // g, tts_sr // g).astype(np.float32)
 
-    voices = pick_voices(Path(args.mce), args.n_voices, rng, spk_map)
+    voices = pick_voices(Path(args.mce), args.n_voices, random.Random(args.voice_seed), spk_map)
     split = {str(v): ("val" if i < args.val_voices else "train") for i, v in enumerate(voices)}
     print(f"voices: {len(voices)} ({args.val_voices} held out for val)", flush=True)
     labels = open(out / "labels.jsonl", "a", encoding="utf-8")
@@ -141,7 +144,7 @@ def main() -> None:
         tel = rng.random() < 0.5
         if tel:
             y = degrade(y, rng.uniform(15, 25), nrng)
-        sid = f"addr_{i:05d}"
+        sid = f"{args.id_prefix}addr_{i:05d}"
         sf.write(out / "addressee" / f"{sid}.wav", y, SR)
         labels.write(json.dumps({"id": sid, "task": "addressee", "label": to_agent,
                                  "subtype": sub, "text": text, "voice": v.parent.name,
@@ -173,10 +176,10 @@ def main() -> None:
                            rng.uniform(-2, 2))
             if tel:  # 最小对两侧同一信道条件,保证只差语调
                 y = degrade(y, 20.0, nrng)
-            sid = f"echo_{made:05d}_{lab}"
+            sid = f"{args.id_prefix}echo_{made:05d}_{lab}"
             sf.write(out / "intonation" / f"{sid}.wav", y, SR)
             labels.write(json.dumps({"id": sid, "task": "intonation",
-                                     "label": int(lab == "question"), "pair": made,
+                                     "label": int(lab == "question"), "pair": f"{args.id_prefix}{made}",
                                      "text": val, "voice": v.parent.name,
                                      "split": split[str(v)], "tel": tel},
                                     ensure_ascii=False) + "\n")
