@@ -53,7 +53,7 @@ def to_agent_texts(rng: random.Random, n: int) -> list[tuple[str, str]]:
     pool += [(t, "floor_claim") for t, _ in FLOOR_CLAIMS]
     pool += [(t, "question") for t in TO_AGENT_EXTRA]
     for pat, _ in CORRECTION_PATTERNS + CORRECTION_I1:
-        for v in rng.sample(ECHO_VALUES, 6):
+        for v in rng.sample(ECHO_VALUES, 20):
             pool.append((pat.format(new=v), "correction"))
     rng.shuffle(pool)
     return [pool[i % len(pool)] for i in range(n)]
