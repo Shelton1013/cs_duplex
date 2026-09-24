@@ -46,7 +46,7 @@ def main() -> None:
     for i, (text, lab, sub) in enumerate(items):
         for v in VOICES:
             w = tts_wav(text, v, cache, proxy)
-            sid = f"ev_addr_{i:03d}_{v[6:9]}"
+            sid = f"ev_addr_{i:03d}_{v[6:-6]}"
             sf.write(out / "addressee" / f"{sid}.wav", w, SR)
             rows.append({"id": sid, "task": "addressee", "label": lab, "subtype": sub,
                          "text": text, "voice": v})
@@ -60,7 +60,7 @@ def main() -> None:
                 dropped += 1
                 continue
             for lab, w in ((1, q), (0, c)):
-                sid = f"ev_echo_{i:03d}_{v[6:9]}_{'q' if lab else 's'}"
+                sid = f"ev_echo_{i:03d}_{v[6:-6]}_{'q' if lab else 's'}"
                 sf.write(out / "intonation" / f"{sid}.wav", w, SR)
                 rows.append({"id": sid, "task": "intonation", "label": lab, "pair": f"{i}_{v}",
                              "text": val, "voice": v})
