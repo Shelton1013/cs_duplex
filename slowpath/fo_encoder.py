@@ -34,7 +34,26 @@ def load_fo_encoder(fo_repo: str, ckpt_dir: str) -> torch.nn.Module:
     missing, unexpected = enc.load_state_dict(enc_sd, strict=False)
     if missing or unexpected:
         raise RuntimeError(f"FO encoder load mismatch: missing={missing[:5]} unexpected={unexpected[:5]}")
-    return enc
+    return FOEncoderWrapper(enc)
+
+
+class FOEncoderWrapper(torch.nn.Module):
+    """整句前向。FO 上游的 speechEncoder.forward 引用了未导入的 make_pad_mask(且仓库中同名
+    函数签名不符),该训练路径在其推理中从未被调用;这里按相同逻辑重写,不改动其仓库。
+    流式 chunk 注意力由各层自身的 chunk_size / left_chunks 配置控制。"""
+
+    def __init__(self, enc: torch.nn.Module):
+        super().__init__()
+        self.enc = enc
+
+    def forward(self, xs: torch.Tensor, ilens: torch.Tensor):
+        T = xs.size(1)
+        masks = (torch.arange(T, device=xs.device)[None, :] < ilens[:, None]).unsqueeze(1)
+        if self.enc.global_cmvn is not None:
+            xs = self.enc.global_cmvn(xs)
+        for module in self.enc.enc:
+            xs, ilens, masks = module(xs, ilens, masks)
+        return xs, masks
 
 
 def unfreeze_top_blocks(enc: torch.nn.Module, n_top: int) -> int:
