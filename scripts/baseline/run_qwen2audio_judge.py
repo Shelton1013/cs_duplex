@@ -64,18 +64,12 @@ def main() -> None:
         # 强制二选一(冒烟发现 Qwen2-Audio 不遵守"只输出一个词",会先写解释,
         # 自由生成被截断后无法解析)。改为比较两个候选答案的对数似然:
         # 一次前向拿到 prompt 末位 KV,再分别打分候选 token 序列。
-        L = inputs["input_ids"].shape[1]
-        scores = {}
+        # 只比首 token(STOP vs CONT):多 token 候选做长度平均会偏向
+        # CONTINUE(其第二个 token 在 CONT 之后概率≈1,冒烟时全判 CONTINUE)
         with torch.no_grad():
-            for cand, ids in CAND_IDS.items():
-                cid = torch.tensor([ids], device=model.device, dtype=inputs["input_ids"].dtype)
-                full = dict(inputs)
-                full["input_ids"] = torch.cat([inputs["input_ids"], cid], 1)
-                full["attention_mask"] = torch.cat(
-                    [inputs["attention_mask"], torch.ones_like(cid)], 1)
-                logits = model(**full).logits[0].float()
-                lp = torch.log_softmax(logits[L - 1: L - 1 + len(ids)], -1)
-                scores[cand] = sum(lp[i, t].item() for i, t in enumerate(ids)) / len(ids)
+            logits = model(**inputs).logits[0, -1].float()
+        lp = torch.log_softmax(logits, -1)
+        scores = {c: lp[ids[0]].item() for c, ids in CAND_IDS.items()}
         ans = max(scores, key=scores.get)
         return ans, time.time() - t0
 
