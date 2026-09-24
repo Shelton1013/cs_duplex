@@ -64,20 +64,61 @@ def classify(text: str) -> str:
     return "content"
 
 
+def build_asr(kind: str, device: str, model_path: str):
+    """返回 asr(seg)->(text, seconds)。
+    sensevoice:SenseVoice-Small(language=yue);env=funasr
+    qwen3asr  :Qwen3-ASR-1.7B-hf(transformers 原生;language 留空以支持句内混语,
+               调用方式参照 qwen3_asr_mce 工具包已验证的 runner);env=qwen3omni
+    """
+    if kind == "sensevoice":
+        from funasr import AutoModel
+        model = AutoModel(model="iic/SenseVoiceSmall", device=device, disable_update=True)
+
+        def asr(seg: np.ndarray) -> tuple[str, float]:
+            t0 = time.time()
+            res = model.generate(input=seg, cache={}, language="yue", use_itn=False)
+            return (res[0]["text"] if res else ""), time.time() - t0
+        return asr
+
+    if kind == "qwen3asr":
+        import tempfile
+        import torch
+        import transformers
+        from transformers import AutoProcessor
+        proc = AutoProcessor.from_pretrained(model_path)
+        cls = next(getattr(transformers, n) for n in
+                   ("AutoModelForMultimodalLM", "Qwen3ASRForConditionalGeneration",
+                    "AutoModelForSpeechSeq2Seq") if hasattr(transformers, n))
+        model = cls.from_pretrained(model_path, dtype=torch.bfloat16, device_map=device).eval()
+        tmp = Path(tempfile.mkdtemp()) / "seg.wav"
+
+        def asr(seg: np.ndarray) -> tuple[str, float]:
+            t0 = time.time()
+            if len(seg) < 1600:  # <0.1s 转写无意义
+                return "", time.time() - t0
+            sf.write(tmp, seg, 16000)
+            inputs = proc.apply_transcription_request(audio=str(tmp))
+            inputs = inputs.to(model.device, model.dtype)
+            with torch.no_grad():
+                ids = model.generate(**inputs, max_new_tokens=48, do_sample=False)
+            text = proc.decode(ids[:, inputs["input_ids"].shape[1]:],
+                               return_format="transcription_only")
+            text = text[0] if isinstance(text, list) else text
+            return text.strip(), time.time() - t0
+        return asr
+    raise ValueError(kind)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--probes", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--device", default="cuda:0")
+    ap.add_argument("--asr", default="sensevoice", choices=["sensevoice", "qwen3asr"])
+    ap.add_argument("--asr_model", default="/home/pxieaf/home2/model/Qwen3-ASR-1.7B-hf")
     args = ap.parse_args()
 
-    from funasr import AutoModel
-    model = AutoModel(model="iic/SenseVoiceSmall", device=args.device, disable_update=True)
-
-    def asr(seg: np.ndarray) -> tuple[str, float]:
-        t0 = time.time()
-        res = model.generate(input=seg, cache={}, language="yue", use_itn=False)
-        return (res[0]["text"] if res else ""), time.time() - t0
+    asr = build_asr(args.asr, args.device, args.asr_model)
 
     asr(np.zeros(8000, np.float32))  # 预热,避免首条延迟虚高
     out = Path(args.out)
