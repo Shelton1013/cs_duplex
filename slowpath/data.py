@@ -47,11 +47,12 @@ def load_wav(path: str) -> np.ndarray:
 
 
 class StageAData(torch.utils.data.Dataset):
-    def __init__(self, mce_jsonl: str | None, stage0_dir: str | None, stage0_split: str = "train",
+    def __init__(self, mce_jsonl: str | list[str] | None, stage0_dir: str | None, stage0_split: str = "train",
                  max_sec: float = 15.0, limit: int = 0, qs_repeat: int = 1):
         self.items = []
-        if mce_jsonl:
-            for line in open(mce_jsonl, encoding="utf-8"):
+        jsonls = [mce_jsonl] if isinstance(mce_jsonl, str) else (mce_jsonl or [])
+        for path in jsonls:  # MCE 与伪标签数据格式相同:{audio, text}
+            for line in open(path, encoding="utf-8"):
                 r = json.loads(line)
                 self.items.append({"audio": r["audio"], "text": r["text"], "qs": -1})
         if stage0_dir:

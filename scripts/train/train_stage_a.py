@@ -47,6 +47,22 @@ def to_dev(batch, dev):
     return {k: (v.to(dev) if torch.is_tensor(v) else v) for k, v in batch.items()}
 
 
+def specaug(batch: dict, n_t: int = 2, max_t: int = 20, n_f: int = 2, max_f: int = 10) -> dict:
+    """SpecAugment(只作用于 fbank,不动韵律旁路;v0 在 3.5k 步后过拟合)。"""
+    fb = batch["fbank"].clone()
+    for b in range(fb.shape[0]):
+        T = int(batch["fbank_len"][b])
+        for _ in range(n_t):
+            w = random.randint(0, max_t)
+            t0 = random.randint(0, max(0, T - w))
+            fb[b, t0:t0 + w] = 0
+        for _ in range(n_f):
+            w = random.randint(0, max_f)
+            f0 = random.randint(0, 80 - w)
+            fb[b, :, f0:f0 + w] = 0
+    return {**batch, "fbank": fb}
+
+
 @torch.no_grad()
 def evaluate(model, dev_dl, qs_dl, dev, n_decode=16):
     model.eval()
@@ -97,6 +113,9 @@ def main() -> None:
     ap.add_argument("--w_tone", type=float, default=0.3)
     ap.add_argument("--w_qs", type=float, default=0.3)
     ap.add_argument("--qs_repeat", type=int, default=3, help="语调样本重复次数(量少,平衡采样)")
+    ap.add_argument("--extra_jsonl", nargs="*", default=[], help="额外训练数据(如伪标签 pseudo.jsonl)")
+    ap.add_argument("--specaug", action="store_true")
+    ap.add_argument("--init", default="", help="从已有 trainable.pt 继续(如 v0)")
     ap.add_argument("--eval_every", type=int, default=500)
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--workers", type=int, default=6)
@@ -127,7 +146,12 @@ def main() -> None:
     sched = torch.optim.lr_scheduler.LambdaLR(
         opt, lambda s: min(1.0, (s + 1) / warm) * 0.5 * (1 + math.cos(math.pi * min(1.0, s / args.steps))))
 
-    train = StageAData(args.mce_train, args.stage0, "train", limit=args.limit, qs_repeat=args.qs_repeat)
+    if args.init:
+        sd = torch.load(args.init, map_location="cpu")
+        missing = model.load_state_dict(sd, strict=False)
+        print(f"init from {args.init}: loaded {len(sd)} tensors", flush=True)
+    train = StageAData([args.mce_train] + args.extra_jsonl, args.stage0, "train",
+                       limit=args.limit, qs_repeat=args.qs_repeat)
     dev_set = StageAData(args.mce_dev, None, limit=args.limit or 200)
     qs_val = StageAData(None, args.stage0, "val", limit=args.limit or 0)
     print(f"data: train={len(train)} dev={len(dev_set)} qs_val={len(qs_val)}", flush=True)
@@ -136,11 +160,13 @@ def main() -> None:
     dev_dl = torch.utils.data.DataLoader(dev_set, batch_size=8, num_workers=2, collate_fn=collate)
     qs_dl = torch.utils.data.DataLoader(qs_val, batch_size=16, num_workers=2, collate_fn=collate)
 
-    step, t0, log = 0, time.time(), open(out / "log.jsonl", "a")
+    step, t0, log, best = 0, time.time(), open(out / "log.jsonl", "a"), float("inf")
     model.train()
     model.llm.eval()
     while step < args.steps:
         for batch in dl:
+            if args.specaug:
+                batch = specaug(batch)
             batch = to_dev(batch, dev)
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 loss, parts = model(batch, args.w_tone, args.w_qs)
@@ -162,6 +188,10 @@ def main() -> None:
                 log.flush()
                 state = {n: p.detach().cpu() for n, p in model.named_parameters() if p.requires_grad}
                 torch.save(state, out / "trainable.pt")
+                if ev["dev_asr"] < best:  # 按验证集 ASR 损失保留最佳(v0 后期过拟合)
+                    best = ev["dev_asr"]
+                    torch.save(state, out / "best.pt")
+                    print(f"  new best dev_asr={best} @ step {step}", flush=True)
             if step >= args.steps:
                 break
     print("done ->", out, flush=True)
