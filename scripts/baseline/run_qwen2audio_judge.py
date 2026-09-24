@@ -39,6 +39,9 @@ def main() -> None:
     proc = AutoProcessor.from_pretrained(args.model)
     model = Qwen2AudioForConditionalGeneration.from_pretrained(
         args.model, dtype=torch.bfloat16, device_map="cuda:0").eval()
+    tok = proc.tokenizer
+    CAND_IDS = {c: tok.encode(c, add_special_tokens=False) for c in ("STOP", "CONTINUE")}
+    print("candidate token ids:", CAND_IDS, flush=True)
 
     def judge(audio: np.ndarray, agent_prefix: str) -> tuple[str, float]:
         conv = [
@@ -58,10 +61,22 @@ def main() -> None:
                           return_tensors="pt", padding=True)
         inputs = inputs.to(model.device)
         t0 = time.time()
+        # 强制二选一(冒烟发现 Qwen2-Audio 不遵守"只输出一个词",会先写解释,
+        # 自由生成被截断后无法解析)。改为比较两个候选答案的对数似然:
+        # 一次前向拿到 prompt 末位 KV,再分别打分候选 token 序列。
+        L = inputs["input_ids"].shape[1]
+        scores = {}
         with torch.no_grad():
-            ids = model.generate(**inputs, max_new_tokens=4, do_sample=False)
-        ans = proc.batch_decode(ids[:, inputs["input_ids"].shape[1]:],
-                                skip_special_tokens=True)[0].strip().upper()
+            for cand, ids in CAND_IDS.items():
+                cid = torch.tensor([ids], device=model.device, dtype=inputs["input_ids"].dtype)
+                full = dict(inputs)
+                full["input_ids"] = torch.cat([inputs["input_ids"], cid], 1)
+                full["attention_mask"] = torch.cat(
+                    [inputs["attention_mask"], torch.ones_like(cid)], 1)
+                logits = model(**full).logits[0].float()
+                lp = torch.log_softmax(logits[L - 1: L - 1 + len(ids)], -1)
+                scores[cand] = sum(lp[i, t].item() for i, t in enumerate(ids)) / len(ids)
+        ans = max(scores, key=scores.get)
         return ans, time.time() - t0
 
     judge(np.zeros(16000, np.float32), "")  # 预热
