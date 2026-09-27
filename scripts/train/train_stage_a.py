@@ -30,10 +30,26 @@ from slowpath.model import SlowPath  # noqa: E402
 MCE = "/home/share/data_makchen/peng/datasets/MCE/dealed_mce"
 
 
+_CC = None
+
+
+def _norm(s: str) -> str:
+    """统一为香港繁体(伪标签来自简体 SenseVoice、MCE 为繁体),避免简繁差异算作错误。"""
+    global _CC
+    if _CC is None:
+        try:
+            from opencc import OpenCC
+            _CC = OpenCC("s2hk")
+        except ImportError:
+            _CC = False
+    s = _CC.convert(s) if _CC else s
+    return s.replace("系", "係")
+
+
 def mer(ref: str, hyp: str) -> tuple[int, int]:
-    """混合错误率:中文按字、英文按词切分后的编辑距离。"""
+    """混合错误率:中文按字、英文按词切分后的编辑距离(先做简繁统一)。"""
     tok = lambda s: [t for t in __import__("re").findall(r"[A-Za-z']+|\d+|[^\sA-Za-z\d\W]", s.lower())]
-    r, h = tok(ref), tok(hyp)
+    r, h = tok(_norm(ref)), tok(_norm(hyp))
     d = list(range(len(h) + 1))
     for i in range(1, len(r) + 1):
         prev, d[0] = d[0], i
@@ -64,7 +80,7 @@ def specaug(batch: dict, n_t: int = 2, max_t: int = 20, n_f: int = 2, max_f: int
 
 
 @torch.no_grad()
-def evaluate(model, dev_dl, qs_dl, dev, n_decode=16):
+def evaluate(model, dev_dl, qs_dl, dev, n_decode=200):
     model.eval()
     losses, errs, n_tok, shown = [], 0, 0, []
     for bi, batch in enumerate(dev_dl):
@@ -116,6 +132,9 @@ def main() -> None:
     ap.add_argument("--extra_jsonl", nargs="*", default=[], help="额外训练数据(如伪标签 pseudo.jsonl)")
     ap.add_argument("--specaug", action="store_true")
     ap.add_argument("--init", default="", help="从已有 trainable.pt 继续(如 v0)")
+    ap.add_argument("--llm_lora", type=int, default=0, help=">0 时给 LLM 加 LoRA(秩)")
+    ap.add_argument("--lr_lora", type=float, default=1e-4)
+    ap.add_argument("--n_decode", type=int, default=200, help="每次评测解码的 dev 条数(MER)")
     ap.add_argument("--eval_every", type=int, default=500)
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--workers", type=int, default=6)
@@ -134,14 +153,23 @@ def main() -> None:
     n_enc = unfreeze_top_blocks(enc, args.n_top)
     model = SlowPath(enc, llm, tok).to(dev)
     model.llm.to(torch.bfloat16)
+    if args.llm_lora > 0:  # 小数据下只训 adapter 对齐不足(v0/v1 MER 仍高),给 LLM 加 LoRA
+        from peft import LoraConfig, get_peft_model
+        model.llm = get_peft_model(model.llm, LoraConfig(
+            r=args.llm_lora, lora_alpha=2 * args.llm_lora, lora_dropout=0.05,
+            target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]))
     new_params = [p for n, p in model.named_parameters()
                   if p.requires_grad and not n.startswith(("encoder.", "llm."))]
     enc_params = [p for p in model.encoder.parameters() if p.requires_grad]
+    lora_params = [p for n, p in model.named_parameters() if p.requires_grad and n.startswith("llm.")]
     print(f"trainable: new={sum(p.numel() for p in new_params) / 1e6:.1f}M "
-          f"encoder_top={n_enc / 1e6:.1f}M (n_top={args.n_top})", flush=True)
+          f"encoder_top={n_enc / 1e6:.1f}M (n_top={args.n_top}) "
+          f"llm_lora={sum(p.numel() for p in lora_params) / 1e6:.1f}M", flush=True)
 
-    opt = torch.optim.AdamW([{"params": new_params, "lr": args.lr_new},
-                             {"params": enc_params, "lr": args.lr_enc}], weight_decay=0.01)
+    groups = [{"params": new_params, "lr": args.lr_new}, {"params": enc_params, "lr": args.lr_enc}]
+    if lora_params:
+        groups.append({"params": lora_params, "lr": args.lr_lora})
+    opt = torch.optim.AdamW(groups, weight_decay=0.01)
     warm = min(500, args.steps // 10)
     sched = torch.optim.lr_scheduler.LambdaLR(
         opt, lambda s: min(1.0, (s + 1) / warm) * 0.5 * (1 + math.cos(math.pi * min(1.0, s / args.steps))))
@@ -172,7 +200,7 @@ def main() -> None:
                 loss, parts = model(batch, args.w_tone, args.w_qs)
             opt.zero_grad(set_to_none=True)
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(new_params + enc_params, 5.0)
+            torch.nn.utils.clip_grad_norm_(new_params + enc_params + lora_params, 5.0)
             opt.step()
             sched.step()
             step += 1
@@ -182,7 +210,7 @@ def main() -> None:
                 print(json.dumps(rec), flush=True)
                 log.write(json.dumps(rec) + "\n")
             if step % args.eval_every == 0 or step == args.steps:
-                ev = evaluate(model, dev_dl, qs_dl, dev)
+                ev = evaluate(model, dev_dl, qs_dl, dev, args.n_decode)
                 print("EVAL", json.dumps({"step": step, **ev}, ensure_ascii=False), flush=True)
                 log.write(json.dumps({"step": step, "eval": ev}, ensure_ascii=False) + "\n")
                 log.flush()
