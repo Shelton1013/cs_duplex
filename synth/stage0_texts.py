@@ -46,6 +46,16 @@ SIDE_NO_VOCATIVE = [
 ]
 
 
+# Stage B v1 补充应声(v0 仅约 70 条,准确率 57–62%);与评测用的真人小样文本无关
+BC_EXTRA = ["嗯", "嗯嗯", "嗯嗯嗯", "係", "係呀", "係係", "係呀係呀", "哦", "哦哦", "啱", "啱啱啱",
+            "好", "好好", "OK", "okok", "明白", "明白明白", "知", "知道", "yes", "yeah", "right",
+            "嗯哼", "係咁", "哦係", "OK明白"]
+
+
+def bc_texts(rng: random.Random, n: int) -> list[tuple[str, str]]:
+    return [(rng.choice(BC_EXTRA), "backchannel") for _ in range(n)]
+
+
 def to_agent_texts(rng: random.Random, n: int) -> list[tuple[str, str]]:
     """(text, subtype)"""
     pool: list[tuple[str, str]] = []

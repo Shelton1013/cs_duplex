@@ -36,7 +36,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts" / "baseline"))
 from make_telephone import degrade  # noqa: E402
 from render_probes import tail_ratio  # noqa: E402
-from synth.stage0_texts import ECHO_VALUES, side_texts, to_agent_texts  # noqa: E402
+from synth.stage0_texts import ECHO_VALUES, bc_texts, side_texts, to_agent_texts  # noqa: E402
 
 SR = 16000
 INSTR_YUE = "You are a helpful assistant. 请用广东话表达。<|endofprompt|>"
@@ -97,6 +97,7 @@ def main() -> None:
     ap.add_argument("--spk_map", default="", help="cluster_mce_speakers.py 的输出(目录→说话人)")
     ap.add_argument("--voice_seed", type=int, default=0,
                     help="音色选择与 train/val 划分的种子;分片并行时各片须相同")
+    ap.add_argument("--only_bc", type=int, default=0, help=">0:只生成这么多条应声(说话对象任务,近讲)")
     ap.add_argument("--id_prefix", default="", help="分片并行时的样本 id 前缀,避免重名")
     args = ap.parse_args()
     spk_map = (json.loads(Path(args.spk_map).read_text(encoding="utf-8"))["folder2spk"]

@@ -68,6 +68,7 @@ def main() -> None:
     ap.add_argument("--lora", type=int, default=16)
     ap.add_argument("--w_qs", type=float, default=0.3)
     ap.add_argument("--specaug", action="store_true")
+    ap.add_argument("--fuse", action="store_true", help="Stage B v1:韵律专用分支与 LLM 分数融合")
     ap.add_argument("--eval_every", type=int, default=300)
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--workers", type=int, default=6)
@@ -93,7 +94,7 @@ def main() -> None:
     model.llm = get_peft_model(model.llm, LoraConfig(
         r=args.lora, lora_alpha=2 * args.lora, lora_dropout=0.05,
         target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]))
-    decider = Decider(model)
+    decider = Decider(model, fuse=args.fuse)
 
     new_p = [p for n, p in model.named_parameters() if p.requires_grad and not n.startswith(("encoder.", "llm."))]
     enc_p = [p for p in model.encoder.parameters() if p.requires_grad]

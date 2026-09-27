@@ -39,6 +39,7 @@ def main() -> None:
     ap.add_argument("--out", required=True)
     ap.add_argument("--thr", type=float, default=0.0)
     ap.add_argument("--lora", type=int, default=16)
+    ap.add_argument("--fuse", action="store_true")
     ap.add_argument("--fo_repo", default="/home/pxieaf/Freeze-Omni")
     ap.add_argument("--fo_ckpt", default="/home/share/data_makchen/peng/models/Freeze-Omni/checkpoints/audiollm")
     ap.add_argument("--llm", default="/home/pxieaf/home2/model/Qwen3-1.7B")
@@ -53,11 +54,11 @@ def main() -> None:
     model.llm = get_peft_model(model.llm, LoraConfig(
         r=args.lora, lora_alpha=2 * args.lora, lora_dropout=0.0,
         target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]))
+    decider = Decider(model, fuse=args.fuse)  # 融合参数须在载入权重前创建
     sd = torch.load(args.ckpt, map_location="cpu")
     missing, unexpected = model.load_state_dict(sd, strict=False)
     assert not unexpected, unexpected[:5]
     model.eval()
-    decider = Decider(model)
 
     def judge(seg: np.ndarray, prefix: str) -> tuple[float, float]:
         t0 = time.time()

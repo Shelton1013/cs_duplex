@@ -32,6 +32,10 @@ class SlowPath(nn.Module):
                                      nn.Linear(llm_dim, llm_dim), nn.LayerNorm(llm_dim))
         self.tone_head = nn.Linear(feat, N_TONE + 1)
         self.qs_head = nn.Sequential(nn.Linear(feat * 2, 256), nn.GELU(), nn.Linear(256, 1))
+        # 韵律专用分支(PLAN §2.3 备选方案):只看原始韵律特征、不接触编码器。
+        # Stage B v0 发现:含编码器特征的 qs_head 同 TTS 82%、换 TTS 65%;
+        # Stage 0 纯韵律特征换 TTS 仍有 83% → 编码器带着 TTS 痕迹,会淹没语调信号。
+        self.pros_head = nn.Sequential(nn.Linear(pros_in * 4, 64), nn.GELU(), nn.Linear(64, 1))
         for p in self.llm.parameters():
             p.requires_grad = False
         ids = lambda s: tokenizer(s, add_special_tokens=False, return_tensors="pt").input_ids[0]
@@ -99,6 +103,16 @@ class SlowPath(nn.Module):
             n = int(valid[b].sum())
             tails.append(z[b, max(0, n - max(1, n // 3)): n].mean(0))
         return self.qs_head(torch.cat([mean, torch.stack(tails)], -1).float()).squeeze(-1)
+
+    def pros_logits(self, pros: torch.Tensor, fb_len: torch.Tensor) -> torch.Tensor:
+        """韵律专用分支。pros (B,T25,8) 原始韵律;按有效长度做 整句均值 / 整句标准差 /
+        句尾 1/3 均值 / 最后 3 帧均值 四种池化 → (B, 32) → 质疑倾向 logit。"""
+        feats = []
+        for b in range(pros.shape[0]):
+            n = max(3, min(pros.shape[1], int(fb_len[b]) // 4))
+            x = pros[b, :n].float()
+            feats.append(torch.cat([x.mean(0), x.std(0), x[n - max(1, n // 3):].mean(0), x[n - 3:].mean(0)]))
+        return self.pros_head(torch.stack(feats)).squeeze(-1)
 
     def forward(self, batch: dict, w_tone: float = 0.3, w_qs: float = 0.3):
         z, valid = self.frames(batch["fbank"], batch["fbank_len"], batch["pros"])
