@@ -130,8 +130,12 @@ def main() -> None:
 
     # ---- 说话对象任务 ----
     half = args.n_addr // 2
-    items = [(t, s, 1) for t, s in to_agent_texts(rng, half)] + \
-            [(t, s, 0) for t, s in side_texts(rng, half)]
+    if args.only_bc:  # 只补应声(近讲),不生成语调对
+        items = [(t, s, 1) for t, s in bc_texts(rng, args.only_bc)]
+        args.n_echo = 0
+    else:
+        items = [(t, s, 1) for t, s in to_agent_texts(rng, half)] + \
+                [(t, s, 0) for t, s in side_texts(rng, half)]
     rng.shuffle(items)
     for i, (text, sub, to_agent) in enumerate(items):
         v = rng.choice(voices)
